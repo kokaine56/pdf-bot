@@ -272,6 +272,12 @@ async def backup_db_job(context: ContextTypes.DEFAULT_TYPE):
 # --- INITIAL UPLOADS ---
 
 async def handle_initial_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Cleanup previous dangling files if user interrupted a previous flow by sending a new file
+    old_path = context.user_data.get('pdf_path')
+    if old_path and os.path.exists(old_path):
+        try: os.remove(old_path)
+        except: pass
+
     doc = update.message.document
     if not doc or doc.mime_type != 'application/pdf':
         await update.message.reply_text("❌ Not a PDF. Please upload a PDF file or an image.")
@@ -310,7 +316,19 @@ async def handle_initial_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return CHOOSING_ACTION
 
 async def handle_initial_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Triggered when the user sends an image straight from the start screen."""
+    """Triggered when the user sends an image straight from the start screen or overwrites a flow."""
+    # Cleanup previous dangling images/pdfs if interrupted
+    old_path = context.user_data.get('pdf_path')
+    if old_path and os.path.exists(old_path):
+        try: os.remove(old_path)
+        except: pass
+    
+    old_imgs = context.user_data.get('images', [])
+    for img in old_imgs:
+        if os.path.exists(img):
+            try: os.remove(img)
+            except: pass
+            
     context.user_data['images'] = []
     return await receive_image(update, context)
 
@@ -866,7 +884,11 @@ def main():
 
     cancel_h = CallbackQueryHandler(cancel_process, pattern="^cancel$")
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            MessageHandler(filters.Document.PDF, handle_initial_pdf),
+            MessageHandler(filters.PHOTO, handle_initial_image)
+        ],
         states={
             WAIT_FOR_UPLOAD: [
                 MessageHandler(filters.Document.PDF, handle_initial_pdf),
@@ -890,7 +912,12 @@ def main():
                 MessageHandler(filters.Document.PDF, handle_merge_upload)
             ]
         },
-        fallbacks=[CommandHandler("cancel", cancel_process), CommandHandler("start", start)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_process), 
+            CommandHandler("start", start),
+            MessageHandler(filters.Document.PDF, handle_initial_pdf),
+            MessageHandler(filters.PHOTO, handle_initial_image)
+        ],
     )
     app.add_handler(conv)
     
