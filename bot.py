@@ -24,6 +24,7 @@ from pypdf import PdfReader, PdfWriter
 import img2pdf
 from pdf2image import convert_from_path
 from PIL import Image
+from pdf2docx import Converter
 
 # Import Configuration
 from config import TOKEN, ADMIN_ID, POPPLER_PATH, MAX_FILE_SIZE, DB_CHANNEL_ID, BACKUP_INTERVAL
@@ -142,11 +143,11 @@ WAIT_FOR_UPLOAD, CHOOSING_ACTION, TYPE_PASSWORD, UPLOAD_IMAGES, TYPE_UNLOCK_PASS
 # --- KEYBOARDS ---
 def get_pdf_action_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📄 PDF to Image", callback_data="pdf2img"), InlineKeyboardButton("🔒 Lock PDF", callback_data="lock")],
-        [InlineKeyboardButton("🔓 Unlock PDF", callback_data="unlock"), InlineKeyboardButton("➕ Merge PDF", callback_data="merge")],
-        [InlineKeyboardButton("✂️ Split PDF", callback_data="split"), InlineKeyboardButton("📉 Reduce Size", callback_data="reduce")],
-        [InlineKeyboardButton("🔢 Add Page No.", callback_data="pagenum"), InlineKeyboardButton("💧 Watermark", callback_data="watermark")],
-        [InlineKeyboardButton("🔓 Recover Password", callback_data="crack")]
+        [InlineKeyboardButton("📄 PDF to Image", callback_data="pdf2img"), InlineKeyboardButton("📝 PDF to Word", callback_data="pdf2word")],
+        [InlineKeyboardButton("🔒 Lock PDF", callback_data="lock"), InlineKeyboardButton("🔓 Unlock PDF", callback_data="unlock")],
+        [InlineKeyboardButton("➕ Merge PDF", callback_data="merge"), InlineKeyboardButton("✂️ Split PDF", callback_data="split")],
+        [InlineKeyboardButton("📉 Reduce Size", callback_data="reduce"), InlineKeyboardButton("🔢 Add Page No.", callback_data="pagenum")],
+        [InlineKeyboardButton("💧 Watermark", callback_data="watermark"), InlineKeyboardButton("🔓 Recover Password", callback_data="crack")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -386,6 +387,10 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         
     elif action == "pdf2img":
         await pdf_to_images(update, context, path, query.message)
+        return ConversationHandler.END
+        
+    elif action == "pdf2word":
+        await pdf_to_word(update, path, query.message)
         return ConversationHandler.END
         
     elif action == "pagenum":
@@ -718,6 +723,8 @@ async def split_pdf(update, path, msg):
         await update.effective_message.reply_document(open(f, "rb"))
         os.remove(f)
     await msg.delete()
+    if os.path.exists(path):
+        os.remove(path)
 
 async def pdf_to_images(update, context, path, msg):
     await msg.edit_text("⏳ Converting...")
@@ -738,6 +745,36 @@ async def pdf_to_images(update, context, path, msg):
         await msg.delete()
     except Exception as e:
         await msg.edit_text(f"❌ Error: {e}")
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+async def pdf_to_word(update, path, msg):
+    await msg.edit_text("⏳ Converting PDF to Word (this might take a moment)...")
+    out_docx = f"word_{os.path.splitext(os.path.basename(path))[0]}.docx"
+    
+    def _convert():
+        try:
+            cv = Converter(path)
+            cv.convert(out_docx, start=0, end=None)
+            cv.close()
+            return True
+        except Exception as e:
+            logger.error(f"Word Conversion Error: {e}")
+            return False
+
+    success = await asyncio.to_thread(_convert)
+    
+    if success and os.path.exists(out_docx):
+        await msg.edit_text("📤 Uploading Word document...")
+        await update.effective_message.reply_document(open(out_docx, "rb"), caption="📝 **Converted to Word**", parse_mode="Markdown")
+        os.remove(out_docx)
+        await msg.delete()
+    else:
+        await msg.edit_text("❌ Conversion failed. The PDF might be scanned or corrupted.")
+    
+    if os.path.exists(path):
+        os.remove(path)
 
 async def add_page_numbers(update, path, msg):
     await msg.edit_text("⏳ Adding numbers...")
@@ -761,6 +798,9 @@ async def add_page_numbers(update, path, msg):
         os.remove(out)
     except:
         await msg.edit_text("❌ Failed.")
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 async def handle_watermark_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text
