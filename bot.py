@@ -138,7 +138,7 @@ class PasswordDatabase:
 db = PasswordDatabase()
 
 # --- STATES ---
-WAIT_FOR_UPLOAD, CHOOSING_ACTION, TYPE_PASSWORD, UPLOAD_IMAGES, TYPE_UNLOCK_PASSWORD, TYPE_WATERMARK_TEXT, CHOOSE_COMPRESSION, MERGE_UPLOAD = range(8)
+WAIT_FOR_UPLOAD, CHOOSING_ACTION, TYPE_PASSWORD, UPLOAD_IMAGES, TYPE_UNLOCK_PASSWORD, TYPE_WATERMARK_TEXT, CHOOSE_COMPRESSION, MERGE_UPLOAD, CHOOSE_PAGENUM_POS = range(9)
 
 # --- KEYBOARDS ---
 def get_pdf_action_keyboard():
@@ -166,6 +166,14 @@ def get_compression_keyboard():
     keyboard = [
         [InlineKeyboardButton("Low Quality (~90% Reduction)", callback_data="comp_20")],
         [InlineKeyboardButton("Medium Quality (~60% Reduction)", callback_data="comp_50")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_pagenum_pos_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("↖️ Top Left", callback_data="pos_tl"), InlineKeyboardButton("⬆️ Top Center", callback_data="pos_tc"), InlineKeyboardButton("↗️ Top Right", callback_data="pos_tr")],
+        [InlineKeyboardButton("↙️ Bottom Left", callback_data="pos_bl"), InlineKeyboardButton("⬇️ Bottom Center", callback_data="pos_bc"), InlineKeyboardButton("↘️ Bottom Right", callback_data="pos_br")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -364,6 +372,14 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return CHOOSE_COMPRESSION
 
+    elif action == "pagenum":
+        await query.edit_message_text(
+            "🔢 **Select Page Number Position**\n\nWhere would you like to place the page numbers?",
+            reply_markup=get_pagenum_pos_keyboard(),
+            parse_mode="Markdown"
+        )
+        return CHOOSE_PAGENUM_POS
+
     elif action == "merge":
         # Save the current file as the first file for merging
         context.user_data['merge_files'] = [{
@@ -391,10 +407,6 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         
     elif action == "pdf2word":
         await pdf_to_word(update, path, query.message)
-        return ConversationHandler.END
-        
-    elif action == "pagenum":
-        await add_page_numbers(update, path, query.message)
         return ConversationHandler.END
 
     return CHOOSING_ACTION
@@ -473,6 +485,17 @@ async def handle_compression_choice(update: Update, context: ContextTypes.DEFAUL
          try: os.remove(path)
          except: pass
          
+    return ConversationHandler.END
+
+async def handle_pagenum_pos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    pos = query.data.split('_')[1] # tl, tc, tr, bl, bc, br
+    path = context.user_data.get('pdf_path')
+    
+    await add_page_numbers(update, path, query.message, pos)
+    
     return ConversationHandler.END
 
 # --- CORE LOGIC (DB INTEGRATED) ---
@@ -776,7 +799,7 @@ async def pdf_to_word(update, path, msg):
     if os.path.exists(path):
         os.remove(path)
 
-async def add_page_numbers(update, path, msg):
+async def add_page_numbers(update, path, msg, pos):
     await msg.edit_text("⏳ Adding numbers...")
     out = f"num_{os.path.basename(path)}"
     try:
@@ -786,7 +809,17 @@ async def add_page_numbers(update, path, msg):
             for i, p in enumerate(r.pages):
                 packet = io.BytesIO()
                 can = canvas.Canvas(packet, pagesize=A4)
-                can.drawString(290, 20, str(i + 1))
+                
+                # Determine position coordinates based on A4 size (approx 595.27 x 841.89 points)
+                if pos == 'tl': x, y = 30, 810
+                elif pos == 'tc': x, y = 297, 810
+                elif pos == 'tr': x, y = 550, 810
+                elif pos == 'bl': x, y = 30, 30
+                elif pos == 'bc': x, y = 297, 30
+                elif pos == 'br': x, y = 550, 30
+                else: x, y = 297, 30 # Fallback to bottom center
+
+                can.drawString(x, y, str(i + 1))
                 can.save()
                 packet.seek(0)
                 p.merge_page(PdfReader(packet).pages[0])
@@ -796,7 +829,8 @@ async def add_page_numbers(update, path, msg):
         await asyncio.to_thread(_num)
         await update.effective_message.reply_document(open(out, "rb"), caption="🔢 Numbered PDF (A4)")
         os.remove(out)
-    except:
+    except Exception as e:
+        logger.error(f"Page Number Error: {e}")
         await msg.edit_text("❌ Failed.")
     finally:
         if os.path.exists(path):
@@ -945,6 +979,10 @@ def main():
             TYPE_WATERMARK_TEXT: [cancel_h, MessageHandler(filters.TEXT & ~filters.COMMAND, handle_watermark_text)],
             CHOOSE_COMPRESSION: [
                 CallbackQueryHandler(handle_compression_choice, pattern="^comp_"),
+                cancel_h
+            ],
+            CHOOSE_PAGENUM_POS: [
+                CallbackQueryHandler(handle_pagenum_pos, pattern="^pos_"),
                 cancel_h
             ],
             MERGE_UPLOAD: [
