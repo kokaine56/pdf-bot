@@ -27,7 +27,7 @@ from PIL import Image
 from pdf2docx import Converter
 
 # Import Configuration
-from config import TOKEN, ADMIN_ID, POPPLER_PATH, MAX_FILE_SIZE, DB_CHANNEL_ID, BACKUP_INTERVAL
+from config import TOKEN, ADMIN_ID, POPPLER_PATH, MAX_FILE_SIZE, DB_CHANNEL_ID, BACKUP_INTERVAL, LOCAL_API_URL
 
 # Watermark/Page Numbers support
 try:
@@ -293,7 +293,7 @@ async def handle_initial_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAIT_FOR_UPLOAD
 
     if doc.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ File too large. Max limit is 500MB.")
+        await update.message.reply_text(f"❌ File too large. Max limit is {MAX_FILE_SIZE // (1024*1024)}MB.")
         return WAIT_FOR_UPLOAD
 
     file_id = doc.file_id
@@ -465,7 +465,7 @@ async def handle_merge_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         return MERGE_UPLOAD
 
     if doc.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ File too large. Max limit is 500MB.", reply_markup=get_cancel_keyboard())
+        await update.message.reply_text(f"❌ File too large. Max limit is {MAX_FILE_SIZE // (1024*1024)}MB.", reply_markup=get_cancel_keyboard())
         return MERGE_UPLOAD
 
     file_id = doc.file_id
@@ -995,7 +995,17 @@ async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    builder = Application.builder().token(TOKEN)
+    
+    # Enable support for larger files (up to 2000MB) via Local API Server
+    if LOCAL_API_URL:
+        logger.info(f"Using Local API Server: {LOCAL_API_URL}")
+        # Routing the builder to the local API
+        builder.base_url(f"{LOCAL_API_URL}/bot")
+        builder.base_file_url(f"{LOCAL_API_URL}/file/bot")
+        builder.local_mode(True)
+    
+    app = builder.build()
     
     app.add_handler(CallbackQueryHandler(cancel_crack, pattern="^cancel_crack$"))
     app.add_handler(CommandHandler("db", download_db)) 
