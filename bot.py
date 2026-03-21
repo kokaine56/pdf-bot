@@ -999,10 +999,15 @@ def main():
     
     # Enable support for larger files (up to 2000MB) via Local API Server
     if LOCAL_API_URL:
-        logger.info(f"Using Local API Server: {LOCAL_API_URL}")
+        # Check, add 'https://' if missing, and aggressively strip trailing slashes to fix 502 Bad Gateway
+        api_url = LOCAL_API_URL.rstrip('/')
+        if not api_url.startswith(('http://', 'https://')):
+            api_url = f"https://{api_url}"
+            
+        logger.info(f"Using Local API Server: {api_url}")
         # Routing the builder to the local API
-        builder.base_url(f"{LOCAL_API_URL}/bot")
-        builder.base_file_url(f"{LOCAL_API_URL}/file/bot")
+        builder.base_url(f"{api_url}/bot")
+        builder.base_file_url(f"{api_url}/file/bot")
         builder.local_mode(True)
     
     app = builder.build()
