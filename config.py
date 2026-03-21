@@ -29,5 +29,5 @@ except ValueError:
 # Path to Poppler (if not in PATH)
 POPPLER_PATH = os.getenv('POPPLER_PATH', None)
 
-# Max file size limit (10MB)
-MAX_FILE_SIZE = 10 * 1024 * 1024
+# Max file size limit (500MB)
+MAX_FILE_SIZE = 500 * 1024 * 1024
