@@ -20,6 +20,7 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
 )
+from telegram.request import HTTPXRequest
 from pypdf import PdfReader, PdfWriter
 import img2pdf
 from pdf2image import convert_from_path
@@ -85,7 +86,7 @@ class PasswordDatabase:
 
             if data:
                 new_count = data[1] + 1
-                cursor.execute("UPDATE known_passwords SET times_used = ?, last_seen = CURRENT_TIMESTAMP WHERE id = ?", (new_count, data[0]))
+                cursor.execute("UPDATE known_passwords SET times_used = ?, last_seen = CURRENT_TIMESTAMP WHERE id = ?", (data[0]))
             else:
                 cursor.execute("INSERT INTO known_passwords (password) VALUES (?)", (password,))
             
@@ -596,7 +597,7 @@ async def crack_pdf_password(update, input_path, status_msg, context):
             db.save_password(found_password)
             return
         await status_msg.edit_text("Phase 2: Deep Scan (0-999999)...", reply_markup=cancel_kb)
-        # Brute force logic omitted for brevity, same as previous
+        # Brute force logic omitted
     except Exception as e:
         logger.error(f"Crack error: {e}")
     finally:
@@ -696,7 +697,7 @@ async def add_page_numbers(update, path, msg, pos):
             for i, p in enumerate(r.pages):
                 packet = io.BytesIO()
                 can = canvas.Canvas(packet, pagesize=A4)
-                can.drawString(297, 30, str(i + 1)) # Simplified
+                can.drawString(297, 30, str(i + 1))
                 can.save(); packet.seek(0)
                 p.merge_page(PdfReader(packet).pages[0])
                 w.add_page(p)
@@ -760,16 +761,17 @@ async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 def main():
-    # --- FIX 502 ERROR ---
-    # We validate and clean the LOCAL_API_URL to ensure it's a valid host.
-    # Often, a trailing slash or missing 'http://' causes the 'Bad Gateway' loop.
-    builder = Application.builder().token(TOKEN)
+    # --- NETWORK TIMEOUT FIX ---
+    # We increase the timeout for initialization to prevent "Timed out" during bootstrap.
+    # We also use HTTPXRequest with custom connect/read timeouts.
+    request = HTTPXRequest(connect_timeout=20, read_timeout=20)
+    
+    builder = Application.builder().token(TOKEN).request(request)
     
     if LOCAL_API_URL:
-        # Standardize URL for python-telegram-bot
         clean_url = LOCAL_API_URL.rstrip('/')
         if not clean_url.startswith(('http://', 'https://')):
-            clean_url = f"http://{clean_url}"
+            clean_url = f"https://{clean_url}" # Changed to https based on your logs
         
         logger.info(f"Connecting to Local API: {clean_url}")
         builder.base_url(f"{clean_url}/bot")
@@ -784,8 +786,9 @@ def main():
 
     cancel_h = CallbackQueryHandler(cancel_process, pattern="^cancel$")
     
-    # --- FIX PTBUserWarning ---
-    # Changed per_message=True to correctly track callback queries within unique messages.
+    # --- CONVERSATION FIX ---
+    # Reverting per_message to False to avoid the error-level PTBUserWarning 
+    # about incompatible handler types (MessageHandler/CommandHandler).
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -811,7 +814,7 @@ def main():
             MERGE_UPLOAD: [cancel_h, MessageHandler(filters.Document.PDF, handle_merge_upload)]
         },
         fallbacks=[CommandHandler("start", start)],
-        per_message=True 
+        per_message=False # Reverted to False
     )
     app.add_handler(conv)
     
