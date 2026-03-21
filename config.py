@@ -31,7 +31,7 @@ POPPLER_PATH = os.getenv('POPPLER_PATH', None)
 
 # Local Telegram API Server URL (Required for files > 20MB)
 # Changed to default to the standard local server address
-LOCAL_API_URL = os.getenv('LOCAL_API_URL', 'pdf-bot-production-37a4.up.railway.app')
+LOCAL_API_URL = os.getenv('LOCAL_API_URL', 'https://pdf-bot-production-37a4.up.railway.app/')
 
 # Max file size limit (500MB)
 MAX_FILE_SIZE = 500 * 1024 * 1024
