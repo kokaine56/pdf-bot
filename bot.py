@@ -293,7 +293,7 @@ async def handle_initial_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAIT_FOR_UPLOAD
 
     if doc.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ File too large. Max limit is 10MB.")
+        await update.message.reply_text(f"❌ File too large. Max limit is 500MB.")
         return WAIT_FOR_UPLOAD
 
     file_id = doc.file_id
@@ -465,7 +465,7 @@ async def handle_merge_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         return MERGE_UPLOAD
 
     if doc.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ File too large. Max limit is 10MB.", reply_markup=get_cancel_keyboard())
+        await update.message.reply_text(f"❌ File too large. Max limit is 500MB.", reply_markup=get_cancel_keyboard())
         return MERGE_UPLOAD
 
     file_id = doc.file_id
