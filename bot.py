@@ -352,10 +352,40 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     path = context.user_data.get('pdf_path')
 
     if action == "lock":
+        try:
+            # Check if PDF is already encrypted to prevent double-locking errors
+            if PdfReader(path).is_encrypted:
+                keyboard = [
+                    [InlineKeyboardButton("🔓 Unlock PDF", callback_data="unlock")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                ]
+                await query.edit_message_text(
+                    "🔒 **This PDF is already encrypted.**\n\nWould you like to unlock it instead?",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+                return CHOOSING_ACTION
+        except Exception: pass
+
         await query.edit_message_text("🔑 Send the **password** to lock this file.", reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
         return TYPE_PASSWORD
     
     elif action == "unlock":
+        try:
+            # Check if PDF is actually encrypted before asking for password
+            if not PdfReader(path).is_encrypted:
+                keyboard = [
+                    [InlineKeyboardButton("🔒 Lock PDF instead", callback_data="lock")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                ]
+                await query.edit_message_text(
+                    "🔓 **This PDF does not have a password set.**\n\nWould you like to set a password to lock it?",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+                return CHOOSING_ACTION
+        except Exception: pass
+
         await query.edit_message_text("🔑 Send the **password** to unlock.", reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
         return TYPE_UNLOCK_PASSWORD
 
@@ -390,6 +420,21 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return MERGE_UPLOAD
 
     elif action == "crack":
+        try:
+            # Prevent cracking if the PDF isn't actually encrypted
+            if not PdfReader(path).is_encrypted:
+                keyboard = [
+                    [InlineKeyboardButton("🔒 Lock PDF instead", callback_data="lock")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+                ]
+                await query.edit_message_text(
+                    "🔓 **This PDF is not encrypted.** There is no password to recover.\n\nWould you like to lock it instead?",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+                return CHOOSING_ACTION
+        except Exception: pass
+
         if context.user_data.get('is_cracking'):
             await query.edit_message_text("⚠️ A password recovery is already in progress.")
             return ConversationHandler.END
@@ -1010,3 +1055,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
