@@ -20,7 +20,6 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
 )
-from telegram.request import HTTPXRequest
 from pypdf import PdfReader, PdfWriter
 import img2pdf
 from pdf2image import convert_from_path
@@ -28,7 +27,7 @@ from PIL import Image
 from pdf2docx import Converter
 
 # Import Configuration
-from config import TOKEN, ADMIN_ID, POPPLER_PATH, MAX_FILE_SIZE, DB_CHANNEL_ID, BACKUP_INTERVAL, LOCAL_API_URL
+from config import TOKEN, ADMIN_ID, POPPLER_PATH, MAX_FILE_SIZE, DB_CHANNEL_ID, BACKUP_INTERVAL
 
 # Watermark/Page Numbers support
 try:
@@ -86,7 +85,7 @@ class PasswordDatabase:
 
             if data:
                 new_count = data[1] + 1
-                cursor.execute("UPDATE known_passwords SET times_used = ?, last_seen = CURRENT_TIMESTAMP WHERE id = ?", (data[0]))
+                cursor.execute("UPDATE known_passwords SET times_used = ?, last_seen = CURRENT_TIMESTAMP WHERE id = ?", (new_count, data[0]))
             else:
                 cursor.execute("INSERT INTO known_passwords (password) VALUES (?)", (password,))
             
@@ -189,6 +188,7 @@ def get_image_upload_keyboard():
 # --- CONVERSATION FLOW ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Track user statistics
     user = update.effective_user
     if user:
         db.add_user(user.id)
@@ -213,6 +213,7 @@ async def cancel_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer("Cancelled")
     
+    # Cleanup files
     keys_to_clean = ['pdf_path', 'merge_files']
     for key in keys_to_clean:
         data = context.user_data.get(key)
@@ -229,6 +230,7 @@ async def cancel_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return await start(update, context)
 
 async def cancel_crack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Specific handler to cancel password recovery."""
     query = update.callback_query
     await query.answer("Stopping...")
     if 'crack_stop_event' in context.user_data:
@@ -279,6 +281,7 @@ async def backup_db_job(context: ContextTypes.DEFAULT_TYPE):
 # --- INITIAL UPLOADS ---
 
 async def handle_initial_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Cleanup previous dangling files if user interrupted a previous flow by sending a new file
     old_path = context.user_data.get('pdf_path')
     if old_path and os.path.exists(old_path):
         try: os.remove(old_path)
@@ -290,7 +293,7 @@ async def handle_initial_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAIT_FOR_UPLOAD
 
     if doc.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ File too large. Max limit is {MAX_FILE_SIZE // (1024*1024)}MB.")
+        await update.message.reply_text(f"❌ File too large. Max limit is 10MB.")
         return WAIT_FOR_UPLOAD
 
     file_id = doc.file_id
@@ -322,6 +325,8 @@ async def handle_initial_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return CHOOSING_ACTION
 
 async def handle_initial_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Triggered when the user sends an image straight from the start screen or overwrites a flow."""
+    # Cleanup previous dangling images/pdfs if interrupted
     old_path = context.user_data.get('pdf_path')
     if old_path and os.path.exists(old_path):
         try: os.remove(old_path)
@@ -347,38 +352,10 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     path = context.user_data.get('pdf_path')
 
     if action == "lock":
-        try:
-            if PdfReader(path).is_encrypted:
-                keyboard = [
-                    [InlineKeyboardButton("🔓 Unlock PDF", callback_data="unlock")],
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-                ]
-                await query.edit_message_text(
-                    "🔒 **This PDF is already encrypted.**\n\nWould you like to unlock it instead?",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown"
-                )
-                return CHOOSING_ACTION
-        except Exception: pass
-
         await query.edit_message_text("🔑 Send the **password** to lock this file.", reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
         return TYPE_PASSWORD
     
     elif action == "unlock":
-        try:
-            if not PdfReader(path).is_encrypted:
-                keyboard = [
-                    [InlineKeyboardButton("🔒 Lock PDF instead", callback_data="lock")],
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-                ]
-                await query.edit_message_text(
-                    "🔓 **This PDF does not have a password set.**\n\nWould you like to set a password to lock it?",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown"
-                )
-                return CHOOSING_ACTION
-        except Exception: pass
-
         await query.edit_message_text("🔑 Send the **password** to unlock.", reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
         return TYPE_UNLOCK_PASSWORD
 
@@ -388,7 +365,8 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     elif action == "reduce":
         await query.edit_message_text(
-            "📉 **Select Compression Level**\n\nChoose how much you want to reduce the file size.",
+            "📉 **Select Compression Level**\n\n"
+            "Choose how much you want to reduce the file size by reducing image quality.",
             reply_markup=get_compression_keyboard(),
             parse_mode="Markdown"
         )
@@ -403,6 +381,7 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return CHOOSE_PAGENUM_POS
 
     elif action == "merge":
+        # Save the current file as the first file for merging
         context.user_data['merge_files'] = [{
             'path': path,
             'name': context.user_data.get('pdf_name', 'document.pdf')
@@ -411,26 +390,13 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return MERGE_UPLOAD
 
     elif action == "crack":
-        try:
-            if not PdfReader(path).is_encrypted:
-                keyboard = [
-                    [InlineKeyboardButton("🔒 Lock PDF instead", callback_data="lock")],
-                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-                ]
-                await query.edit_message_text(
-                    "🔓 **This PDF is not encrypted.**\n\nWould you like to lock it instead?",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown"
-                )
-                return CHOOSING_ACTION
-        except Exception: pass
-
         if context.user_data.get('is_cracking'):
             await query.edit_message_text("⚠️ A password recovery is already in progress.")
             return ConversationHandler.END
         context.application.create_task(crack_pdf_password(update, path, query.message, context))
         return ConversationHandler.END 
 
+    # Immediate actions
     elif action == "split":
         await split_pdf(update, path, query.message)
         return ConversationHandler.END
@@ -450,11 +416,11 @@ async def action_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 async def handle_merge_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     doc = update.message.document
     if not doc or doc.mime_type != 'application/pdf':
-        await update.message.reply_text("❌ Not a PDF.", reply_markup=get_cancel_keyboard())
+        await update.message.reply_text("❌ Not a PDF. Please upload a PDF file.", reply_markup=get_cancel_keyboard())
         return MERGE_UPLOAD
 
     if doc.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ Too large.", reply_markup=get_cancel_keyboard())
+        await update.message.reply_text(f"❌ File too large. Max limit is 10MB.", reply_markup=get_cancel_keyboard())
         return MERGE_UPLOAD
 
     file_id = doc.file_id
@@ -496,42 +462,54 @@ async def handle_merge_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await msg.edit_text(f"❌ Merge failed: {e}")
     
+    # Cleanup
     for file_info in files:
         if os.path.exists(file_info['path']):
             try: os.remove(file_info['path'])
             except: pass
     
     context.user_data['merge_files'] = []
-    context.user_data.pop('pdf_path', None)
+    context.user_data.pop('pdf_path', None) # Clean initial file reference too
     return ConversationHandler.END
 
 async def handle_compression_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
+    
     quality = int(query.data.split('_')[1])
     path = context.user_data.get('pdf_path')
+    
     await compress_pdf(update, path, query.message, quality)
+    
     if path and os.path.exists(path):
          try: os.remove(path)
          except: pass
+         
     return ConversationHandler.END
 
 async def handle_pagenum_pos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    pos = query.data.split('_')[1]
+    
+    pos = query.data.split('_')[1] # tl, tc, tr, bl, bc, br
     path = context.user_data.get('pdf_path')
+    
     await add_page_numbers(update, path, query.message, pos)
+    
     return ConversationHandler.END
+
+# --- CORE LOGIC (DB INTEGRATED) ---
 
 async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     password = update.message.text
     if password.startswith('/'): return await start(update, context)
     path = context.user_data.get('pdf_path')
+    
     status_msg = await update.message.reply_text("⏳ Encrypting...")
     
     try:
         db.save_password(password)
+        
         def _lock():
             r = PdfReader(path)
             w = PdfWriter()
@@ -540,6 +518,7 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             out = f"lock_{os.path.basename(path)}"
             with open(out, "wb") as f: w.write(f)
             return out
+
         out_path = await asyncio.to_thread(_lock)
         await status_msg.edit_text(f"✅ Locked.\nPassword: `{password}`", parse_mode="Markdown")
         await update.message.reply_document(document=open(out_path, "rb"))
@@ -547,12 +526,14 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         os.remove(path)
     except Exception as e:
         await status_msg.edit_text(f"❌ Error: {e}")
+    
     return ConversationHandler.END
 
 async def handle_unlock_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     password = update.message.text
     path = context.user_data.get('pdf_path')
     status_msg = await update.message.reply_text("⏳ Decrypting...")
+
     try:
         def _unlock():
             r = PdfReader(path)
@@ -563,12 +544,20 @@ async def handle_unlock_password(update: Update, context: ContextTypes.DEFAULT_T
             out = f"unlock_{os.path.basename(path)}"
             with open(out, "wb") as f: w.write(f)
             return out
+
         out_path = await asyncio.to_thread(_unlock)
         db.save_password(password)
+
+        # Re-assign path to decrypted file, delete old encrypted file
         context.user_data['pdf_path'] = out_path
         if os.path.exists(path): os.remove(path)
-        await status_msg.edit_text("✅ **PDF Unlocked!**", reply_markup=get_pdf_action_keyboard(), parse_mode="Markdown")
+
+        await status_msg.edit_text(
+            "✅ **PDF Unlocked!**\nWhat would you like to do next?",
+            reply_markup=get_pdf_action_keyboard(), parse_mode="Markdown"
+        )
         return CHOOSING_ACTION
+
     except ValueError:
         await status_msg.edit_text("❌ Wrong password.", reply_markup=get_cancel_keyboard())
         return TYPE_UNLOCK_PASSWORD
@@ -581,23 +570,108 @@ async def crack_pdf_password(update, input_path, status_msg, context):
     stop_event = asyncio.Event()
     context.user_data['crack_stop_event'] = stop_event
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_crack")]])
+
     try:
-        await status_msg.edit_text("Phase 1: Searching...", reply_markup=cancel_kb)
+        await status_msg.edit_text("Phase 1 : The Smart Way\nSearching...", parse_mode="Markdown", reply_markup=cancel_kb)
+        
         known_passwords = db.get_priority_passwords()
+        found_password = None
+
         def check_db_passwords():
             r = PdfReader(input_path)
             for pwd in known_passwords:
                 try:
-                    if r.decrypt(pwd) > 0: return pwd
+                    if r.decrypt(pwd) > 0:
+                        return pwd
                 except: continue
             return None
+
         found_password = await asyncio.to_thread(check_db_passwords)
+
         if found_password:
-            await status_msg.edit_text(f"✅ Found: `{found_password}`", parse_mode="Markdown")
+            await status_msg.edit_text(f"Phase 1 : The Smart Way\nSearching...Found\n\nPassword : `{found_password}`", parse_mode="Markdown")
             db.save_password(found_password)
             return
-        await status_msg.edit_text("Phase 2: Deep Scan (0-999999)...", reply_markup=cancel_kb)
-        # Brute force logic omitted
+
+        if stop_event.is_set(): return
+
+        await status_msg.edit_text(
+            "Phase 2 : Deep Scan\nSearching...0 to 999999", 
+            parse_mode="Markdown",
+            reply_markup=cancel_kb
+        )
+        
+        found_password = None
+        
+        async def output_reader(master_fd):
+            nonlocal found_password
+            loop = asyncio.get_running_loop()
+            buffer = ""
+            while not stop_event.is_set():
+                try:
+                    data = await loop.run_in_executor(None, os.read, master_fd, 1024)
+                    if not data: break
+                    
+                    text_chunk = data.decode('utf-8', errors='ignore')
+                    buffer += text_chunk
+                    
+                    if "found user-password: '" in buffer:
+                        found_password = buffer.split("found user-password: '")[1].split("'")[0]
+                        stop_event.set()
+                        break
+                        
+                    if len(buffer) > 2000:
+                        buffer = buffer[-1000:]
+                        
+                except Exception:
+                    break
+
+        try:
+            base_cmd = ["pdfcrack", "-f", input_path, "-c", "0123456789", "-n", "1", "-m", "6"]
+            cmd = ["stdbuf", "-o0", "-e0"] + base_cmd if shutil.which("stdbuf") else base_cmd
+            
+            master, slave = pty.openpty()
+            process = subprocess.Popen(cmd, stdout=slave, stderr=slave, close_fds=True)
+            os.close(slave)
+
+            start_time = time.time()
+            timeout = 60
+            asyncio.create_task(output_reader(master))
+            
+            while not stop_event.is_set():
+                if process.poll() is not None: break
+                elapsed = int(time.time() - start_time)
+                remaining = max(0, timeout - elapsed)
+                
+                if elapsed > timeout:
+                    process.terminate()
+                    await status_msg.edit_text("❌ Timeout reached (1 min limit).")
+                    return
+
+                try:
+                    await status_msg.edit_text(
+                        f"Phase 2 : Deep Scan\nSearching...\n\nProcess will stop in {remaining}s", 
+                        parse_mode="Markdown",
+                        reply_markup=cancel_kb
+                    )
+                except: pass
+                
+                await asyncio.sleep(2)
+
+            if process.poll() is None: process.terminate()
+            try: os.close(master)
+            except: pass
+
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Error: {e}")
+            return
+
+        if found_password:
+            db.save_password(found_password)
+            await status_msg.edit_text(f"Phase 2 : Deep Scan\nSearching...Found\n\nPassword : `{found_password}`", parse_mode="Markdown")
+        elif not stop_event.is_set() and not found_password:
+             await status_msg.edit_text("Phase 2 : Deep Scan\nSearching...Complete\n\nPassword not found in numeric range (0-999999).", parse_mode="Markdown")
+
     except Exception as e:
         logger.error(f"Crack error: {e}")
     finally:
@@ -607,60 +681,86 @@ async def crack_pdf_password(update, input_path, status_msg, context):
 # --- UTILS (COMPRESS, SPLIT, ETC) ---
 
 async def compress_pdf(update, path, msg, quality=50):
-    await msg.edit_text(f"⏳ Compressing...")
+    await msg.edit_text(f"⏳ Compressing (Quality: {quality}%)...")
     out_pdf = f"compress_{os.path.basename(path)}"
+    
     def _comp():
         try:
             images = convert_from_path(path, dpi=120, poppler_path=POPPLER_PATH)
+            
             temp_imgs = []
             for i, img in enumerate(images):
-                tmp_name = f"temp_comp_{i}.jpg"
+                tmp_name = f"temp_comp_{i}_{os.path.basename(path)}.jpg"
                 img.save(tmp_name, 'JPEG', quality=quality, optimize=True)
                 temp_imgs.append(tmp_name)
+
             a4inpt = (img2pdf.mm_to_pt(210), img2pdf.mm_to_pt(297))
             layout_fun = img2pdf.get_layout_fun(a4inpt)
+            
             with open(out_pdf, "wb") as f:
                 f.write(img2pdf.convert(temp_imgs, layout_fun=layout_fun))
+
             for t in temp_imgs:
                 if os.path.exists(t): os.remove(t)
+                
             return True
-        except: return False
+        except Exception as e:
+            logger.error(f"Compression failed: {e}")
+            return False
+
     success = await asyncio.to_thread(_comp)
-    if success:
-        await msg.reply_document(document=open(out_pdf, "rb"), caption="📉 Compressed")
+
+    if success and os.path.exists(out_pdf):
+        original_size = os.path.getsize(path)
+        new_size = os.path.getsize(out_pdf)
+        reduction = original_size - new_size
+        
+        caption = (
+            f"📉 **Compressed PDF (A4)**\n"
+            f"Saved: {reduction / 1024:.1f} KB\n"
+            f"Quality: {quality}%"
+        )
+        
+        await msg.edit_text("📤 Uploading...")
+        await msg.reply_document(document=open(out_pdf, "rb"), caption=caption, parse_mode="Markdown")
         os.remove(out_pdf)
-    await msg.delete()
+    else:
+        await msg.edit_text("❌ Compression failed.")
 
 async def split_pdf(update, path, msg):
     await msg.edit_text("⏳ Splitting...")
     def _split():
         r = PdfReader(path)
         files = []
+        base_name = os.path.basename(path)
         for i in range(min(len(r.pages), 20)):
             w = PdfWriter()
             w.add_page(r.pages[i])
-            name = f"split_{i+1}.pdf"
+            name = f"split_{i+1}_{base_name}"
             with open(name, "wb") as f: w.write(f)
             files.append(name)
         return files
+    
     files = await asyncio.to_thread(_split)
     for f in files:
         await update.effective_message.reply_document(open(f, "rb"))
         os.remove(f)
     await msg.delete()
-    if os.path.exists(path): os.remove(path)
+    if os.path.exists(path):
+        os.remove(path)
 
 async def pdf_to_images(update, context, path, msg):
     await msg.edit_text("⏳ Converting...")
     try:
         def _convert():
-            imgs = convert_from_path(path, first_page=1, last_page=5, poppler_path=POPPLER_PATH)
+            imgs = convert_from_path(path, first_page=1, last_page=10, poppler_path=POPPLER_PATH)
             files = []
             for i, img in enumerate(imgs):
                 name = f"p{i+1}.jpg"
                 img.save(name, 'JPEG')
                 files.append(name)
             return files
+        
         files = await asyncio.to_thread(_convert)
         for f in files:
             await context.bot.send_photo(update.effective_chat.id, open(f, 'rb'))
@@ -669,45 +769,72 @@ async def pdf_to_images(update, context, path, msg):
     except Exception as e:
         await msg.edit_text(f"❌ Error: {e}")
     finally:
-        if os.path.exists(path): os.remove(path)
+        if os.path.exists(path):
+            os.remove(path)
 
 async def pdf_to_word(update, path, msg):
-    await msg.edit_text("⏳ Converting...")
+    await msg.edit_text("⏳ Converting PDF to Word (this might take a moment)...")
     out_docx = f"word_{os.path.splitext(os.path.basename(path))[0]}.docx"
+    
     def _convert():
         try:
             cv = Converter(path)
-            cv.convert(out_docx)
+            cv.convert(out_docx, start=0, end=None)
             cv.close()
             return True
-        except: return False
+        except Exception as e:
+            logger.error(f"Word Conversion Error: {e}")
+            return False
+
     success = await asyncio.to_thread(_convert)
-    if success:
-        await update.effective_message.reply_document(open(out_docx, "rb"))
+    
+    if success and os.path.exists(out_docx):
+        await msg.edit_text("📤 Uploading Word document...")
+        await update.effective_message.reply_document(open(out_docx, "rb"), caption="📝 **Converted to Word**", parse_mode="Markdown")
         os.remove(out_docx)
-    await msg.delete()
-    if os.path.exists(path): os.remove(path)
+        await msg.delete()
+    else:
+        await msg.edit_text("❌ Conversion failed. The PDF might be scanned or corrupted.")
+    
+    if os.path.exists(path):
+        os.remove(path)
 
 async def add_page_numbers(update, path, msg, pos):
-    await msg.edit_text("⏳ Numbering...")
+    await msg.edit_text("⏳ Adding numbers...")
     out = f"num_{os.path.basename(path)}"
     try:
         def _num():
-            r = PdfReader(path); w = PdfWriter()
+            r = PdfReader(path)
+            w = PdfWriter()
             for i, p in enumerate(r.pages):
                 packet = io.BytesIO()
                 can = canvas.Canvas(packet, pagesize=A4)
-                can.drawString(297, 30, str(i + 1))
-                can.save(); packet.seek(0)
+                
+                # Determine position coordinates based on A4 size (approx 595.27 x 841.89 points)
+                if pos == 'tl': x, y = 30, 810
+                elif pos == 'tc': x, y = 297, 810
+                elif pos == 'tr': x, y = 550, 810
+                elif pos == 'bl': x, y = 30, 30
+                elif pos == 'bc': x, y = 297, 30
+                elif pos == 'br': x, y = 550, 30
+                else: x, y = 297, 30 # Fallback to bottom center
+
+                can.drawString(x, y, str(i + 1))
+                can.save()
+                packet.seek(0)
                 p.merge_page(PdfReader(packet).pages[0])
                 w.add_page(p)
             with open(out, "wb") as f: w.write(f)
+
         await asyncio.to_thread(_num)
-        await update.effective_message.reply_document(open(out, "rb"))
+        await update.effective_message.reply_document(open(out, "rb"), caption="🔢 Numbered PDF (A4)")
         os.remove(out)
-    except: await msg.edit_text("❌ Failed.")
+    except Exception as e:
+        logger.error(f"Page Number Error: {e}")
+        await msg.edit_text("❌ Failed.")
     finally:
-        if os.path.exists(path): os.remove(path)
+        if os.path.exists(path):
+            os.remove(path)
 
 async def handle_watermark_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text
@@ -715,80 +842,121 @@ async def handle_watermark_text(update: Update, context: ContextTypes.DEFAULT_TY
     path = context.user_data.get('pdf_path')
     msg = await update.message.reply_text("⏳ Watermarking...")
     out = f"wm_{os.path.basename(path)}"
+    
     try:
         def _wm():
-            r = PdfReader(path); w = PdfWriter(); packet = io.BytesIO()
+            r = PdfReader(path)
+            w = PdfWriter()
+            packet = io.BytesIO()
             can = canvas.Canvas(packet, pagesize=A4)
-            can.setFont("Helvetica", 40); can.saveState(); can.translate(300, 400); can.rotate(45)
-            can.drawCentredString(0, 0, text); can.restoreState(); can.save(); packet.seek(0)
+            can.setFont("Helvetica", 40)
+            can.setFillColorRGB(0.5, 0.5, 0.5, 0.3)
+            can.saveState()
+            can.translate(300, 400)
+            can.rotate(45)
+            can.drawCentredString(0, 0, text)
+            can.restoreState()
+            can.save()
+            packet.seek(0)
             wm_page = PdfReader(packet).pages[0]
+            
             for p in r.pages:
-                p.merge_page(wm_page); w.add_page(p)
+                p.merge_page(wm_page)
+                w.add_page(p)
             with open(out, "wb") as f: w.write(f)
+
         await asyncio.to_thread(_wm)
-        await update.message.reply_document(open(out, "rb"))
-        os.remove(out); os.remove(path)
-    except: await msg.edit_text("❌ Error.")
+        await update.message.reply_document(open(out, "rb"), caption=f"💧 Watermark: {text}")
+        os.remove(out)
+        os.remove(path)
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {e}")
+        if os.path.exists(path): os.remove(path)
     return ConversationHandler.END
 
 async def receive_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     images = context.user_data.setdefault('images', [])
     if len(images) >= 20:
-        await update.message.reply_text("⚠️ Limit reached.", reply_markup=get_image_upload_keyboard())
+        await update.message.reply_text("⚠️ Limit reached (20 images). Click Done.", reply_markup=get_image_upload_keyboard())
         return UPLOAD_IMAGES
+
     f = await update.message.photo[-1].get_file()
-    path = f"img_{f.file_unique_id}.jpg"
+    path = f"temp_img_{f.file_unique_id}.jpg"
     await f.download_to_drive(path)
     images.append(path)
-    await update.message.reply_text(f"Received {len(images)}/20", reply_markup=get_image_upload_keyboard())
+    
+    count = len(images)
+    text = f"Received: {count}/20 images\nKeep sending images. When finished, click Done."
+    
+    media_group_id = update.message.media_group_id
+    
+    if media_group_id:
+        last_group_id = context.user_data.get('last_media_group_id')
+        status_msg_id = context.user_data.get('last_status_msg_id')
+        
+        if media_group_id == last_group_id and status_msg_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=status_msg_id,
+                    text=text,
+                    reply_markup=get_image_upload_keyboard()
+                )
+                return UPLOAD_IMAGES
+            except Exception:
+                pass
+        
+        msg = await update.message.reply_text(text, reply_markup=get_image_upload_keyboard())
+        context.user_data['last_media_group_id'] = media_group_id
+        context.user_data['last_status_msg_id'] = msg.message_id
+        
+    else:
+        await update.message.reply_text(text, reply_markup=get_image_upload_keyboard())
+        context.user_data.pop('last_media_group_id', None)
+        context.user_data.pop('last_status_msg_id', None)
+
     return UPLOAD_IMAGES
 
 async def done_images(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.callback_query: await update.callback_query.answer()
-    msg = await update.effective_message.reply_text("⏳ Creating PDF...")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_reply_markup(reply_markup=None)
+        msg = await update.callback_query.message.reply_text("⏳ Creating PDF...")
+    else:
+        msg = await update.message.reply_text("⏳ Creating PDF...")
+
     imgs = context.user_data.get('images', [])
-    out = "merged.pdf"
+    if not imgs: 
+        await msg.edit_text("❌ No images received.")
+        return await start(update, context)
+        
+    out = "img2pdf_merged.pdf"
     try:
-        def _create():
-            with open(out, "wb") as f: f.write(img2pdf.convert(imgs))
-        await asyncio.to_thread(_create)
-        await msg.chat.send_document(document=open(out, "rb"))
+        def _create_a4_pdf():
+            a4inpt = (img2pdf.mm_to_pt(210), img2pdf.mm_to_pt(297))
+            layout_fun = img2pdf.get_layout_fun(a4inpt)
+            with open(out, "wb") as f:
+                f.write(img2pdf.convert(imgs, layout_fun=layout_fun))
+        
+        await asyncio.to_thread(_create_a4_pdf)
+        await msg.chat.send_document(document=open(out, "rb"), caption="🖼️ Images to PDF (A4)")
+        await msg.delete()
         os.remove(out)
-    except: await msg.edit_text("❌ Error.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {e}")
     for i in imgs: 
         if os.path.exists(i): os.remove(i)
     context.user_data['images'] = []
     return ConversationHandler.END
 
 def main():
-    # --- NETWORK TIMEOUT FIX ---
-    # We increase the timeout for initialization to prevent "Timed out" during bootstrap.
-    # We also use HTTPXRequest with custom connect/read timeouts.
-    request = HTTPXRequest(connect_timeout=20, read_timeout=20)
-    
-    builder = Application.builder().token(TOKEN).request(request)
-    
-    if LOCAL_API_URL:
-        clean_url = LOCAL_API_URL.rstrip('/')
-        if not clean_url.startswith(('http://', 'https://')):
-            clean_url = f"https://{clean_url}" # Changed to https based on your logs
-        
-        logger.info(f"Connecting to Local API: {clean_url}")
-        builder.base_url(f"{clean_url}/bot")
-        builder.base_file_url(f"{clean_url}/file/bot")
-        builder.local_mode(True)
-    
-    app = builder.build()
+    app = Application.builder().token(TOKEN).build()
     
     app.add_handler(CallbackQueryHandler(cancel_crack, pattern="^cancel_crack$"))
     app.add_handler(CommandHandler("db", download_db)) 
     app.add_handler(CommandHandler("info", bot_info))
 
     cancel_h = CallbackQueryHandler(cancel_process, pattern="^cancel$")
-    
-    # --- CONVERSATION FIX ---
-    # Reverting per_message to False to avoid the error-level PTBUserWarning 
-    # about incompatible handler types (MessageHandler/CommandHandler).
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -809,19 +977,35 @@ def main():
                 CallbackQueryHandler(done_images, pattern="^done_uploading$")
             ],
             TYPE_WATERMARK_TEXT: [cancel_h, MessageHandler(filters.TEXT & ~filters.COMMAND, handle_watermark_text)],
-            CHOOSE_COMPRESSION: [CallbackQueryHandler(handle_compression_choice, pattern="^comp_"), cancel_h],
-            CHOOSE_PAGENUM_POS: [CallbackQueryHandler(handle_pagenum_pos, pattern="^pos_"), cancel_h],
-            MERGE_UPLOAD: [cancel_h, MessageHandler(filters.Document.PDF, handle_merge_upload)]
+            CHOOSE_COMPRESSION: [
+                CallbackQueryHandler(handle_compression_choice, pattern="^comp_"),
+                cancel_h
+            ],
+            CHOOSE_PAGENUM_POS: [
+                CallbackQueryHandler(handle_pagenum_pos, pattern="^pos_"),
+                cancel_h
+            ],
+            MERGE_UPLOAD: [
+                cancel_h,
+                MessageHandler(filters.Document.PDF, handle_merge_upload)
+            ]
         },
-        fallbacks=[CommandHandler("start", start)],
-        per_message=False # Reverted to False
+        fallbacks=[
+            CommandHandler("cancel", cancel_process), 
+            CommandHandler("start", start),
+            MessageHandler(filters.Document.PDF, handle_initial_pdf),
+            MessageHandler(filters.PHOTO, handle_initial_image)
+        ],
     )
     app.add_handler(conv)
     
     if DB_CHANNEL_ID:
         app.job_queue.run_repeating(backup_db_job, interval=BACKUP_INTERVAL, first=60)
+        logger.info(f"Auto-backup enabled. Channel: {DB_CHANNEL_ID}, Interval: {BACKUP_INTERVAL}s")
+    else:
+        logger.info("Auto-backup disabled (DB_CHANNEL_ID not set).")
 
-    logger.info("Bot starting...")
+    print("Bot is running...")
     app.run_polling()
 
 if __name__ == '__main__':
